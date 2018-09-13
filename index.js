@@ -9,59 +9,49 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
   const queryFromResolveData = require(`${__dirname}/node_modules/graphile-build-pg/node8plus/queryFromResolveData.js`).default;
   const viaTemporaryTable = require(`${__dirname}/node_modules/graphile-build-pg/node8plus/plugins/viaTemporaryTable.js`).default;
 
-  builder.hook(
-    "GraphQLObjectType:fields",
-    (
-      fields,
-      {
-        extend,
-        getTypeByName,
-        newWithHooks,
-        parseResolveInfo,
-        pgIntrospectionResultsByKind,
-        pgSql: sql,
-        gql2pg,
-        graphql: {
-          GraphQLObjectType,
-          GraphQLInputObjectType,
-          GraphQLNonNull,
-          GraphQLString,
-        },
+  builder.hook("GraphQLObjectType:fields", (fields, build, context) => {
+    const {
+      extend,
+      newWithHooks,
+      parseResolveInfo,
+      pgIntrospectionResultsByKind,
+      pgGetGqlTypeByTypeIdAndModifier,
+      pgGetGqlInputTypeByTypeIdAndModifier,
+      pgSql: sql,
+      gql2pg,
+      graphql: {
+        GraphQLObjectType,
+        GraphQLInputObjectType,
+        GraphQLNonNull,
+        GraphQLString
       },
-      { scope: { isRootMutation }, fieldWithHooks }
-    ) => {
-      if (!isRootMutation) {
-        return fields;
+      pgColumnFilter,
+      inflection,
+      pgQueryFromResolveData: queryFromResolveData,
+      pgOmit: omit,
+      pgViaTemporaryTable: viaTemporaryTable
+    } = build;
+    const {
+      scope: { isRootMutation },
+      fieldWithHooks
+    } = context;
+    if (!isRootMutation) {
+      return fields;
+    }
+
+     return extend(fields, pgIntrospectionResultsByKind.class.filter(table => !!table.namespace).filter(table => table.isSelectable).filter(table => table.isInsertable).filter(table => table.isUpdatable).reduce((memo, table) => {
+      const Table = pgGetGqlTypeByTypeIdAndModifier(table.type.id, null);
+      if (!Table) {
+        return memo;
       }
 
-      return extend(
-        fields,
-        pgIntrospectionResultsByKind.class
-          .filter(table => !!table.namespace)
-          .filter(table => table.isSelectable)
-          .filter(table => table.isInsertable)
-          .filter(table => table.isUpdatable)
-          .reduce((memo, table) => {
-            const Table = getTypeByName(
-              inflection.tableType(table.name, table.namespace.name)
-            );
-
-            if (!Table) {
-              return memo;
-            }
-
-            const TableInput = getTypeByName(inflection.inputType(Table.name));
-            if (!TableInput) {
-              return memo;
-            }
-
-            const tableTypeName = inflection.tableType(
-              table.name,
-              table.namespace.name
-            );
-
+      const TableInput = pgGetGqlInputTypeByTypeIdAndModifier(table.type.id, null);
+      if (!TableInput) {
+          return memo;
+      }
+      const tableTypeName = inflection.tableType(table);
             // Standard input type that 'create' uses
-            const InputType = newWithHooks(
+      const InputType = newWithHooks(
               GraphQLInputObjectType,
               {
                 name: `Upsert${tableTypeName}Input`,
@@ -72,15 +62,17 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
                       "An arbitrary string value with no semantic meaning. Will be included in the payload verbatim. May be used to track mutations by the client.",
                     type: GraphQLString,
                   },
-                  [inflection.tableName(table.name, table.namespace.name)]: {
-                    description: `The \`${tableTypeName}\` to be upserted by this mutation.`,
-                    type: new GraphQLNonNull(TableInput),
-                  },
+                  ...(TableInput ? {
+                      [inflection.tableFieldName(table)]: {
+                        description: `The \`${tableTypeName}\` to be upserted by this mutation.`,
+                        type: new GraphQLNonNull(TableInput),
+                      },
+                  }: null)
                 },
               },
               {
                 isPgCreateInputType: false,
-                pgInflection: table,
+                pgInflection: table
               }
             );
 
@@ -91,10 +83,7 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
                 name: `Upsert${tableTypeName}Payload`,
                 description: `The output of our upsert \`${tableTypeName}\` mutation.`,
                 fields: ({ recurseDataGeneratorsForField }) => {
-                  const tableName = inflection.tableName(
-                    table.name,
-                    table.namespace.name
-                  );
+                  const tableName = inflection.tableFieldName(table);
                   recurseDataGeneratorsForField(tableName);
                   return {
                     clientMutationId: {
@@ -115,20 +104,22 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
               {
                 isMutationPayload: true,
                 isPgCreatePayloadType: false,
-                pgIntrospection: table,
+                pgIntrospection: table
               }
             );
 
             // Create upsert fields from each introspected table
             const fieldName = `upsert${tableTypeName}`;
 
-            memo[fieldName] = fieldWithHooks(fieldName, ({ getDataFromParsedResolveInfoFragment }) => ({
+            memo[fieldName] = fieldWithHooks(fieldName, context => {
+			 const { getDataFromParsedResolveInfoFragment } = context;
+			 return {
               description: `Upserts a single \`${tableTypeName}\`.`,
               type: PayloadType,
               args: {
                 input: {
-                  type: new GraphQLNonNull(InputType),
-                },
+                  type: new GraphQLNonNull(InputType)
+                }
               },
               async resolve(data, { input }, { pgClient }, resolveInfo) {
                 const parsedResolveInfoFragment = parseResolveInfo(
@@ -148,7 +139,7 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
 
                 const sqlColumns = [];
                 const sqlValues = [];
-                const inputData = input[inflection.tableName(table.name, table.namespace.name)];
+                const inputData = input[inflection.tableFieldName(table)];
 
                 // Store attributes (columns) for easy access
                 const attributes = pgIntrospectionResultsByKind.attribute
@@ -168,15 +159,11 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
 
                 // Loop thru columns and "SQLify" them
                 attributes.forEach(attr => {
-                    const fieldName = inflection.column(
-                      attr.name,
-                      table.name,
-                      table.namespace.name
-                    );
+                    const fieldName = inflection.column(attr);
                     const val = inputData[fieldName];
-                    if (val != null) {
+                    if (Object.prototype.hasOwnProperty.call(inputData, fieldName)) {
                       sqlColumns.push(sql.identifier(attr.name));
-                      sqlValues.push(gql2pg(val, attr.type));
+                      sqlValues.push(gql2pg(val, attr.type, attr.typeModifier));
                     }
                   });
 
@@ -198,13 +185,8 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
                     SET ${sql.join(conflictUpdateArray, ", ")}`
                   : sql.fragment`default values`} returning *`;
 
-                const { rows: [row] } = await viaTemporaryTable(
-                  pgClient,
-                  sql.identifier(table.namespace.name, table.name),
-                  mutationQuery,
-                  insertedRowAlias,
-                  query
-                );
+				const rows = await viaTemporaryTable(pgClient, sql.identifier(table.namespace.name, table.name), mutationQuery, insertedRowAlias, query);
+				row = rows[0];
 
                 return {
                   clientMutationId: input.clientMutationId,
@@ -212,13 +194,15 @@ function PgMutationUpsertPlugin(builder, { pgExtendedTypes, pgInflection: inflec
                 };
 
               },
-            }), {});
-
-            return memo;
-          }, {})
-      );
-    }
-  );
+            };
+      }, {
+        pgFieldIntrospection: table,
+        isPgCreateMutationField: false
+      });
+      return memo;
+  }, {}))
+ });
 }
 
 module.exports = PgMutationUpsertPlugin;
+
