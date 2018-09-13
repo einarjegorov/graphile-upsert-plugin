@@ -171,7 +171,10 @@ function PgMutationUpsertPlugin(builder, {pgExtendedTypes, pgInflection: inflect
                         const conflictUpdateArray = sqlColumns.map(col =>
                             sql.query`${sql.identifier(col.names[0])} = excluded.${sql.identifier(col.names[0])}`
                         );
-
+                        const sqlPrimaryKeys = []
+                        primaryKeys.forEach(p => {
+                            sqlPrimaryKeys.push(sql.identifier(p.name));
+                        })
                         // SQL query for upsert mutations
                         const mutationQuery = sql.query`
                           insert into ${sql.identifier(
@@ -181,7 +184,7 @@ function PgMutationUpsertPlugin(builder, {pgExtendedTypes, pgInflection: inflect
                                     ? sql.fragment`(
                               ${sql.join(sqlColumns, ", ")}
                             ) values(${sql.join(sqlValues, ", ")})
-                            ON CONFLICT (${sql.identifier(primaryKeys[0].name)}) DO UPDATE
+                            ON CONFLICT (${sql.join(sqlPrimaryKeys, ", ")}) DO UPDATE
                             SET ${sql.join(conflictUpdateArray, ", ")}`
                             : sql.fragment`default values`} returning *`;
 
