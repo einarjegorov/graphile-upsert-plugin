@@ -6,9 +6,6 @@ function PgMutationUpsertPlugin(builder, {pgExtendedTypes, pgInflection: inflect
     // NOTE: Currently this plugin requires Node version 8 or newer to work!
     // TODO: Detect node version and fetch appropriate files!
 
-    const queryFromResolveData = require(`${__dirname}/node_modules/graphile-build-pg/node8plus/queryFromResolveData.js`).default;
-    const viaTemporaryTable = require(`${__dirname}/node_modules/graphile-build-pg/node8plus/plugins/viaTemporaryTable.js`).default;
-
     builder.hook("GraphQLObjectType:fields", (fields, build, context) => {
         const {
             extend,
@@ -208,4 +205,3 @@ function PgMutationUpsertPlugin(builder, {pgExtendedTypes, pgInflection: inflect
 }
 
 module.exports = PgMutationUpsertPlugin;
-
