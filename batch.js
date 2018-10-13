@@ -9,6 +9,7 @@ function PgMutationUpsertBatchPlugin(builder, { pgInflection: inflection }) {
         newWithHooks,
         parseResolveInfo,
         pgIntrospectionResultsByKind,
+        pgGetGqlTypeByTypeIdAndModifier,
         pgSql: sql,
         gql2pg,
         graphql: {
@@ -99,8 +100,10 @@ function PgMutationUpsertBatchPlugin(builder, { pgInflection: inflection }) {
                       type: GraphQLString,
                     },
                     [inputFieldName]: {
-                      description: `The \`${tableTypeName}\` that were upserted by this mutation.`,
-                      type: new GraphQLList(Table),
+                      description: `The \`${pluralize(
+                        tableTypeName,
+                      )}\` that were upserted by this mutation.`,
+                      type: new GraphQLNonNull(new GraphQLList(Table)),
                       resolve(data) {
                         return data.data
                       },
@@ -129,12 +132,9 @@ function PgMutationUpsertBatchPlugin(builder, { pgInflection: inflection }) {
                   },
                 },
                 async resolve(data, { input }, { pgClient }, resolveInfo) {
-                  const parsedResolveInfoFragment = parseResolveInfo(
-                    resolveInfo,
-                  )
                   const resolveData = getDataFromParsedResolveInfoFragment(
-                    parsedResolveInfoFragment,
-                    PayloadType,
+                    parseResolveInfo(resolveInfo),
+                    PayloadType, //pgGetGqlTypeByTypeIdAndModifier(table.type.id, null),
                   )
                   const insertedRowsAlias = sql.identifier(Symbol())
                   const query = queryFromResolveData(
@@ -165,7 +165,6 @@ function PgMutationUpsertBatchPlugin(builder, { pgInflection: inflection }) {
                   const sqlColumns = attributes.map(attr =>
                     sql.identifier(attr.name),
                   )
-                  let foo = true
                   const sqlRowValues = input[inputFieldName].map(
                     upsertInputRow => {
                       const row = attributes.map(attr => {
@@ -229,7 +228,7 @@ function PgMutationUpsertBatchPlugin(builder, { pgInflection: inflection }) {
                   )} ON CONFLICT (${join(sqlPrimaryKeys)}) DO UPDATE
                     SET ${join(conflictUpdateArray)} RETURNING *`
 
-                  const { rows } = await viaTemporaryTable(
+                  const rows = await viaTemporaryTable(
                     pgClient,
                     sqlTableName,
                     mutationQuery,
