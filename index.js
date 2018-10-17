@@ -62,6 +62,7 @@ function PgMutationUpsertPlugin(builder) {
                 table.name
               }', so we're going to omit it from the upsert mutation.`,
             )
+            return memo
           }
           const tableTypeName = inflection.tableType(table)
           const InputType = newWithHooks(
@@ -135,6 +136,24 @@ function PgMutationUpsertPlugin(builder) {
             },
           )
 
+          // Store attributes (columns) for easy access
+          const attributes = pgIntrospectionResultsByKind.attribute
+            .filter(attr => attr.classId === table.id)
+            .filter(attr => pgColumnFilter(attr, build, context))
+            .filter(attr => !omit(attr, 'create'))
+
+          // Figure out the pkey constraint
+          const primaryKeyConstraint = pgIntrospectionResultsByKind.constraint
+            .filter(con => con.classId === table.id)
+            .filter(con => con.type === 'p')[0]
+
+          // Figure out to which column that pkey constraint belongs to
+          const primaryKeys =
+            primaryKeyConstraint &&
+            primaryKeyConstraint.keyAttributeNums.map(
+              num => attributes.filter(attr => attr.num === num)[0],
+            )
+
           // Create upsert fields from each introspected table
           const fieldName = `upsert${tableTypeName}`
           memo = build.extend(
@@ -170,24 +189,6 @@ function PgMutationUpsertPlugin(builder) {
                       const sqlColumns = []
                       const sqlValues = []
                       const inputData = input[inflection.tableFieldName(table)]
-
-                      // Store attributes (columns) for easy access
-                      const attributes = pgIntrospectionResultsByKind.attribute
-                        .filter(attr => attr.classId === table.id)
-                        .filter(attr => pgColumnFilter(attr, build, context))
-                        .filter(attr => !omit(attr, 'create'))
-
-                      // Figure out the pkey constraint
-                      const primaryKeyConstraint = pgIntrospectionResultsByKind.constraint
-                        .filter(con => con.classId === table.id)
-                        .filter(con => con.type === 'p')[0]
-
-                      // Figure out to which column that pkey constraint belongs to
-                      const primaryKeys =
-                        primaryKeyConstraint &&
-                        primaryKeyConstraint.keyAttributeNums.map(
-                          num => attributes.filter(attr => attr.num === num)[0],
-                        )
 
                       // Loop thru columns and "SQLify" them
                       attributes.forEach(attr => {

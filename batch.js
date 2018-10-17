@@ -63,6 +63,7 @@ function PgMutationUpsertBatchPlugin(builder) {
                 table.name
               }', so we're going to omit it from the upsert batch mutation.`,
             )
+            return memo
           }
           const tableTypeName = inflection.tableType(table)
           const inputFieldName = inflection.pluralize(
@@ -85,7 +86,9 @@ function PgMutationUpsertBatchPlugin(builder) {
                         description: `The \`${inflection.pluralize(
                           tableTypeName,
                         )}\` to be upserted by this mutation. Expects all records to conform to the structure of the first.`,
-                        type: new GraphQLNonNull(new GraphQLList(TableInput)),
+                        type: new GraphQLNonNull(
+                          new GraphQLList(new GraphQLNonNull(TableInput)),
+                        ),
                       },
                     }
                   : null),
@@ -142,6 +145,24 @@ function PgMutationUpsertBatchPlugin(builder) {
             },
           )
 
+          // Store attributes (columns) for easy access
+          const attributes = pgIntrospectionResultsByKind.attribute
+            .filter(attr => attr.classId === table.id)
+            .filter(attr => pgColumnFilter(attr, build, context))
+            .filter(attr => !omit(attr, 'create'))
+
+          // Figure out the pkey constraint
+          const primaryKeyConstraint = pgIntrospectionResultsByKind.constraint
+            .filter(con => con.classId === table.id)
+            .filter(con => con.type === 'p')[0]
+
+          // Figure out to which column that pkey constraint belongs to
+          const primaryKeys =
+            primaryKeyConstraint &&
+            primaryKeyConstraint.keyAttributeNums.map(
+              num => attributes.filter(attr => attr.num === num)[0],
+            )
+
           // Create upsert fields from each introspected table
           const fieldName = `upsert${tableTypeName}Batch`
           memo = build.extend(
@@ -185,24 +206,6 @@ function PgMutationUpsertBatchPlugin(builder) {
                           data: [],
                         }
                       }
-
-                      // Store attributes (columns) for easy access
-                      const attributes = pgIntrospectionResultsByKind.attribute
-                        .filter(attr => attr.classId === table.id)
-                        .filter(attr => pgColumnFilter(attr, build, context))
-                        .filter(attr => !omit(attr, 'create'))
-
-                      // Figure out the pkey constraint
-                      const primaryKeyConstraint = pgIntrospectionResultsByKind.constraint
-                        .filter(con => con.classId === table.id)
-                        .filter(con => con.type === 'p')[0]
-
-                      // Figure out to which column that pkey constraint belongs to
-                      const primaryKeys =
-                        primaryKeyConstraint &&
-                        primaryKeyConstraint.keyAttributeNums.map(
-                          num => attributes.filter(attr => attr.num === num)[0],
-                        )
 
                       // A batch upsert must have all records conforming to the first
                       const _spec = input[inputFieldName][0]
