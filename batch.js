@@ -1,8 +1,8 @@
 const debugFactory = require('debug')
 
-const debug = debugFactory('graphile-upsert')
+const debug = debugFactory('graphile-upsert-batch')
 
-function PgMutationUpsertPlugin(builder) {
+function PgMutationUpsertBatchPlugin(builder) {
   builder.hook('GraphQLObjectType:fields', (fields, build, context) => {
     const {
       extend,
@@ -15,6 +15,7 @@ function PgMutationUpsertPlugin(builder) {
       gql2pg,
       graphql: {
         GraphQLObjectType,
+        GraphQLList,
         GraphQLInputObjectType,
         GraphQLNonNull,
         GraphQLString,
@@ -48,7 +49,7 @@ function PgMutationUpsertPlugin(builder) {
             debug(
               `There was no table type for table '${table.namespace.name}.${
                 table.name
-              }', so we're not generating an upsert mutation for it.`,
+              }', so we're not generating an upsert batch mutation for it.`,
             )
             return memo
           }
@@ -60,16 +61,19 @@ function PgMutationUpsertPlugin(builder) {
             debug(
               `There was no input type for table '${table.namespace.name}.${
                 table.name
-              }', so we're going to omit it from the upsert mutation.`,
+              }', so we're going to omit it from the upsert batch mutation.`,
             )
             return memo
           }
           const tableTypeName = inflection.tableType(table)
+          const inputFieldName = inflection.pluralize(
+            inflection.tableFieldName(table),
+          )
           const InputType = newWithHooks(
             GraphQLInputObjectType,
             {
-              name: `Upsert${tableTypeName}Input`,
-              description: `All input for the upsert \`${tableTypeName}\` mutation.`,
+              name: `Upsert${tableTypeName}BatchInput`,
+              description: `All input for the upsert \`${tableTypeName}\` batch mutation.`,
               fields: {
                 clientMutationId: {
                   description:
@@ -78,16 +82,20 @@ function PgMutationUpsertPlugin(builder) {
                 },
                 ...(TableInput
                   ? {
-                      [inflection.tableFieldName(table)]: {
-                        description: `The \`${tableTypeName}\` to be upserted by this mutation.`,
-                        type: new GraphQLNonNull(TableInput),
+                      [inputFieldName]: {
+                        description: `The \`${inflection.pluralize(
+                          tableTypeName,
+                        )}\` to be upserted by this mutation. Expects all records to conform to the structure of the first.`,
+                        type: new GraphQLNonNull(
+                          new GraphQLList(new GraphQLNonNull(TableInput)),
+                        ),
                       },
                     }
                   : null),
               },
             },
             {
-              __origin: `Adding table upsert input type for ${describePgEntity(
+              __origin: `Adding table upsert batch input type for ${describePgEntity(
                 table,
               )}.`,
               // isPgCreateInputType: true,
@@ -97,23 +105,24 @@ function PgMutationUpsertPlugin(builder) {
           const PayloadType = newWithHooks(
             GraphQLObjectType,
             {
-              name: `Upsert${tableTypeName}Payload`,
-              description: `The output of our upsert \`${tableTypeName}\` mutation.`,
+              name: `Upsert${tableTypeName}BatchPayload`,
+              description: `The output of our upsert \`${tableTypeName}\` batch mutation.`,
               fields: ({ fieldWithHooks }) => {
-                const tableName = inflection.tableFieldName(table)
                 return {
                   clientMutationId: {
                     description:
                       'The exact same `clientMutationId` that was provided in the mutation input, unchanged and unused. May be used by a client to track mutations.',
                     type: GraphQLString,
                   },
-                  [tableName]: pgField(
+                  [inputFieldName]: pgField(
                     build,
                     fieldWithHooks,
-                    tableName,
+                    inputFieldName,
                     {
-                      description: `The \`${tableTypeName}\` that were upserted by this mutation.`,
-                      type: Table,
+                      description: `The \`${inflection.pluralize(
+                        tableTypeName,
+                      )}\` that was upserted by this mutation.`,
+                      type: new GraphQLList(Table),
                     },
                     {
                       // isPgCreatePayloadResultField: true,
@@ -124,7 +133,7 @@ function PgMutationUpsertPlugin(builder) {
               },
             },
             {
-              __origin: `Adding table upsert payload type for ${describePgEntity(
+              __origin: `Adding table upsert batch payload type for ${describePgEntity(
                 table,
               )}. You can  disable the built-in create mutation via:\n\n  ${sqlCommentByAddingTags(
                 table,
@@ -155,7 +164,7 @@ function PgMutationUpsertPlugin(builder) {
             )
 
           // Create upsert fields from each introspected table
-          const fieldName = `upsert${tableTypeName}`
+          const fieldName = `upsert${tableTypeName}Batch`
           memo = build.extend(
             memo,
             {
@@ -164,7 +173,9 @@ function PgMutationUpsertPlugin(builder) {
                 context => {
                   const { getDataFromParsedResolveInfoFragment } = context
                   return {
-                    description: `Upserts a single \`${tableTypeName}\`.`,
+                    description: `Upserts a batch of \`${inflection.pluralize(
+                      tableTypeName,
+                    )}\`.`,
                     type: PayloadType,
                     args: {
                       input: {
@@ -179,42 +190,59 @@ function PgMutationUpsertPlugin(builder) {
                         parsedResolveInfoFragment,
                         PayloadType,
                       )
-                      const upsertedRowAlias = sql.identifier(Symbol())
+                      const upsertedRowsAlias = sql.identifier(Symbol())
                       const query = queryFromResolveData(
-                        upsertedRowAlias,
-                        upsertedRowAlias,
+                        upsertedRowsAlias,
+                        upsertedRowsAlias,
                         resolveData,
                         {},
                       )
-                      const sqlColumns = []
-                      const sqlValues = []
-                      const inputData = input[inflection.tableFieldName(table)]
+                      const inputData = input[inputFieldName]
 
-                      // Loop thru columns and "SQLify" them
-                      attributes.forEach(attr => {
-                        const key = inflection.column(attr)
-                        const val = inputData[key]
-                        if (
-                          Object.prototype.hasOwnProperty.call(inputData, key)
-                        ) {
-                          sqlColumns.push(sql.identifier(attr.name))
-                          sqlValues.push(
-                            gql2pg(val, attr.type, attr.typeModifier),
-                          )
+                      // no inputs, no upserts
+                      if (!inputData || !inputData.length) {
+                        return {
+                          clientMutationId: input.clientMutationId,
+                          data: [],
                         }
-                      })
+                      }
+
+                      // A batch upsert must have all records conforming to the first
+                      const _spec = input[inputFieldName][0]
+                      const specifiedAttributes = attributes.filter(attr =>
+                        Object.prototype.hasOwnProperty.call(
+                          _spec,
+                          inflection.column(attr),
+                        ),
+                      )
+                      // Loop thru columns and "SQLify" them
+                      const sqlColumns = specifiedAttributes.map(attr =>
+                        sql.identifier(attr.name),
+                      )
+                      const sqlRowValues = input[inputFieldName].map(
+                        upsertInputRow => {
+                          const row = specifiedAttributes.map(attr => {
+                            const key = inflection.column(attr)
+                            const columnValue = gql2pg(
+                              upsertInputRow[key],
+                              attr.type,
+                              attr.typeModifier,
+                            )
+                            return columnValue
+                          })
+                          return row
+                        },
+                      )
+
                       const _primaryKeys = primaryKeys.map(
                         key => sql.identifier(key.name).names[0],
                       )
                       const isPrimary = i => _primaryKeys.includes(i.names[0])
 
-                      const join = fields => sql.join(fields, ', ')
-
-                      // Construct a array in case we need to do an update on conflict
                       const conflictUpdateArray = sqlColumns
                         .map(col => {
                           const columnName = sql.identifier(col.names[0])
-                          // TODO add soft vs hard options
+                          // TODO add "no overwrite with null" options
                           // coalesce(excluded.${columnName}, ${tableName}.${columnName})
                           return isPrimary(columnName)
                             ? null
@@ -226,6 +254,7 @@ function PgMutationUpsertPlugin(builder) {
                         table.namespace.name,
                         table.name,
                       )
+                      const join = fields => sql.join(fields, ', ')
 
                       const sqlPrimaryKeys = primaryKeys.map(key =>
                         sql.identifier(key.name),
@@ -233,27 +262,23 @@ function PgMutationUpsertPlugin(builder) {
 
                       // SQL query for upsert mutations
                       const mutationQuery = sql.query`
-                        INSERT INTO ${sqlTableName} ${
-                        sqlColumns.length
-                          ? sql.fragment`(
-                            ${join(sqlColumns)}
-                          ) VALUES (${join(sqlValues)})
-                          ON CONFLICT (${join(sqlPrimaryKeys)}) DO UPDATE
-                          SET ${join(conflictUpdateArray)}`
-                          : sql.fragment`DEFAULT VALUES`
-                      } RETURNING *`
+                        INSERT INTO ${sqlTableName} (
+                          ${join(sqlColumns)}
+                        ) VALUES ${join(
+                          sqlRowValues.map(row => sql.fragment`(${join(row)})`),
+                        )} ON CONFLICT (${join(sqlPrimaryKeys)}) DO UPDATE
+                          SET ${join(conflictUpdateArray)} RETURNING *`
 
-                      let row
+                      let rows
                       try {
                         await pgClient.query('SAVEPOINT graphql_mutation')
-                        const rows = await viaTemporaryTable(
+                        rows = await viaTemporaryTable(
                           pgClient,
                           sql.identifier(table.namespace.name, table.name),
                           mutationQuery,
-                          upsertedRowAlias,
+                          upsertedRowsAlias,
                           query,
                         )
-                        row = rows[0]
                         await pgClient.query(
                           'RELEASE SAVEPOINT graphql_mutation',
                         )
@@ -265,7 +290,7 @@ function PgMutationUpsertPlugin(builder) {
                       }
                       return {
                         clientMutationId: input.clientMutationId,
-                        data: row,
+                        data: rows,
                       }
                     },
                   }
@@ -276,7 +301,7 @@ function PgMutationUpsertPlugin(builder) {
                 },
               ),
             },
-            `Adding upsert mutation for ${describePgEntity(
+            `Adding upsert batch mutation for ${describePgEntity(
               table,
             )}. You can omit this mutation with:\n\n  ${sqlCommentByAddingTags(
               table,
@@ -287,9 +312,9 @@ function PgMutationUpsertPlugin(builder) {
           )
           return memo
         }, {}),
-      `Adding 'upsert' mutation to root mutation`,
+      `Adding 'upsert batch' mutation to root mutation`,
     )
   })
 }
 
-module.exports = PgMutationUpsertPlugin
+module.exports = PgMutationUpsertBatchPlugin
