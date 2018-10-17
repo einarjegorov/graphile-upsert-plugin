@@ -8,7 +8,5 @@
   },
   "author": "Einar Jegorov",
   "license": "MIT",
-  "dependencies": {
-    "graphile-build-pg": "^4.0.0-alpha.5"
-  }
+  "dependencies": {}
 }
